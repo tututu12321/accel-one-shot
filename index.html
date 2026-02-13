@@ -1,50 +1,86 @@
+<!-- index.html -->
 <!doctype html>
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Accel One Shot</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div class="wrap">
-    <h1>Accel One Shot</h1>
+  <main class="wrap">
+    <h1>加速度を短時間だけ取得 → 固定加速度で a / v / x を表示</h1>
 
-    <div class="panel">
+    <section class="panel">
       <div class="row">
-        <button id="btnStart" type="button">Start</button>
-        <button id="btnStop" type="button" disabled>Stop</button>
-        <button id="btnReset" type="button">Reset</button>
+        <button id="btnStart">Start (Capture→Run)</button>
+        <button id="btnStop" disabled>Stop</button>
+        <button id="btnReset">Reset</button>
+      </div>
 
-        <label class="ml">
-          Window (s)
-          <select id="windowSec">
-            <option value="5">5</option>
-            <option value="10" selected>10</option>
-            <option value="20">20</option>
-            <option value="30">30</option>
+      <div class="grid">
+        <label>State
+          <input id="state" type="text" value="WAIT" readonly />
+        </label>
+
+        <label>Axis
+          <select id="axis">
+            <option value="x">X</option>
+            <option value="y">Y</option>
+            <option value="z" selected>Z</option>
           </select>
+        </label>
+
+        <label>Gain
+          <input id="gain" type="number" step="0.1" value="1.0" />
+        </label>
+
+        <label>T_capture [s]
+          <input id="tcapture" type="number" step="0.05" value="0.2" min="0.05" max="0.5" />
         </label>
       </div>
 
-      <div class="row small">
-        <div>Status: <span id="status">idle</span></div>
-        <div class="ml">dt: <span id="dt">-</span> s</div>
-        <div class="ml">|a|: <span id="a">-</span> m/s^2</div>
-        <div class="ml">v: <span id="v">-</span> m/s</div>
-        <div class="ml">p: <span id="p">-</span> m</div>
+      <p class="note">
+        iPhoneは Start 押下後に許可ダイアログが出る場合があります。許可しないと取得できません。重力補正はしません。姿勢で値が変わります。
+      </p>
+    </section>
+
+    <section class="panel">
+      <div class="kpi">
+        <div class="kpiItem">
+          <div class="kpiLabel">t [s]</div>
+          <div class="kpiValue" id="outT">0.000</div>
+        </div>
+        <div class="kpiItem">
+          <div class="kpiLabel">|a| [m/s^2]</div>
+          <div class="kpiValue" id="outA">0.000</div>
+        </div>
+        <div class="kpiItem">
+          <div class="kpiLabel">v [m/s]</div>
+          <div class="kpiValue" id="outV">0.000</div>
+        </div>
+        <div class="kpiItem">
+          <div class="kpiLabel">x [m]</div>
+          <div class="kpiValue" id="outX">0.000</div>
+        </div>
       </div>
 
-      <div class="row small">
-        <div class="hint">iPhoneはStart後に許可が出ます。許可しないと取得できません。</div>
-      </div>
-    </div>
+      <canvas id="plot" width="900" height="320"></canvas>
+      <div class="small">表示：直近10秒（上: |a| / 中: v / 下: x）</div>
+    </section>
 
-    <div class="panel">
-      <canvas id="chart" width="900" height="520"></canvas>
-      <div class="legend small">上段: |Accel| / 中段: Vel / 下段: Pos</div>
-    </div>
-  </div>
+    <section class="panel">
+      <details>
+        <summary>GitHub Pages 設定チェック</summary>
+        <ol>
+          <li>Settings → Pages</li>
+          <li>Build and deployment → Source: Deploy from a branch</li>
+          <li>Branch: main / Folder: /(root) → Save</li>
+          <li>数十秒後、ページ上部に公開URLが出る</li>
+        </ol>
+      </details>
+    </section>
+  </main>
 
   <script src="main.js"></script>
 </body>
