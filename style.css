@@ -1,51 +1,88 @@
-<!doctype html>
-<html lang="ja">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>Accel One Shot</title>
-  <link rel="stylesheet" href="style.css" />
-</head>
-<body>
-  <div class="wrap">
-    <h1>Accel One Shot</h1>
+:root{
+  --bg:#ffffff;
+  --fg:#111111;
+  --panel:#ffffff;
+  --line:#d9d9d9;
+  --muted:#555555;
+}
 
-    <div class="panel">
-      <div class="row">
-        <button id="btnStart" type="button">Start</button>
-        <button id="btnStop" type="button" disabled>Stop</button>
-        <button id="btnReset" type="button">Reset</button>
+*{ box-sizing:border-box; }
 
-        <label class="ml">
-          Window (s)
-          <select id="windowSec">
-            <option value="5">5</option>
-            <option value="10" selected>10</option>
-            <option value="20">20</option>
-            <option value="30">30</option>
-          </select>
-        </label>
-      </div>
+html,body{
+  margin:0;
+  padding:0;
+  background:var(--bg);
+  color:var(--fg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif;
+}
 
-      <div class="row small">
-        <div>Status: <span id="status">idle</span></div>
-        <div class="ml">dt: <span id="dt">-</span> s</div>
-        <div class="ml">|a|: <span id="a">-</span> m/s^2</div>
-        <div class="ml">v: <span id="v">-</span> m/s</div>
-        <div class="ml">p: <span id="p">-</span> m</div>
-      </div>
+.wrap{
+  max-width:980px;
+  margin:0 auto;
+  padding:16px;
+}
 
-      <div class="row small">
-        <div class="hint">iPhoneはStart後に許可が出ます。許可しないと取得できません。</div>
-      </div>
-    </div>
+h1{
+  margin:8px 0 14px;
+  font-size:28px;
+  font-weight:700;
+}
 
-    <div class="panel">
-      <canvas id="chart" width="900" height="520"></canvas>
-      <div class="legend small">上段: |Accel| / 中段: Vel / 下段: Pos</div>
-    </div>
-  </div>
+.panel{
+  position:relative;
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:10px;
+  padding:12px;
+  margin:12px 0;
+}
 
-  <script src="main.js"></script>
-</body>
-</html>
+.row{
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:10px;
+}
+
+.small{ font-size:13px; color:var(--muted); }
+.ml{ margin-left:14px; }
+
+button{
+  position:relative;
+  z-index:10;                 /* これで「押せない」系を回避 */
+  border:1px solid var(--line);
+  background:#f3f3f3;
+  color:var(--fg);
+  padding:10px 14px;
+  border-radius:10px;
+  cursor:pointer;
+  touch-action: manipulation;  /* iOSのタップ挙動を安定化 */
+  -webkit-tap-highlight-color: transparent;
+  font-size:16px;
+}
+
+button:disabled{
+  opacity:0.5;
+  cursor:not-allowed;
+}
+
+select{
+  margin-left:6px;
+  border:1px solid var(--line);
+  background:#ffffff;
+  color:var(--fg);
+  padding:8px 10px;
+  border-radius:10px;
+}
+
+canvas{
+  width:100%;
+  height:auto;
+  border-radius:10px;
+  background:#ffffff;
+  border:1px solid var(--line);
+  pointer-events:none;         /* canvasがタップを吸わないように */
+}
+
+.hint{ line-height:1.5; }
+.legend{ margin-top:8px; }
