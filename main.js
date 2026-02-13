@@ -1,259 +1,415 @@
-const $ = (id) => document.getElementById(id);
+// main.js
+(() => {
+  "use strict";
 
-const btnStart = $("btnStart");
-const btnStop  = $("btnStop");
-const btnReset = $("btnReset");
-const statusEl = $("status");
-const dtEl = $("dt");
-const aEl  = $("a");
-const vEl  = $("v");
-const pEl  = $("p");
-const windowSel = $("windowSec");
+  // ============================================================
+  // Utilities
+  // ============================================================
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const nowSec = () => performance.now() * 1e-3;
 
-const canvas = $("chart");
-const ctx = canvas.getContext("2d");
-
-let running = false;
-let lastT = null;
-
-// 1D series: t, amag, v, p
-let samples = [];
-let v = 0;
-let p = 0;
-let lastA = 0;
-
-// gravity estimation for fallback
-let gLP = { x: 0, y: 0, z: 0 };
-
-function setStatus(s){ statusEl.textContent = s; }
-function fmt(x){ return (isFinite(x) ? x.toFixed(3) : "-"); }
-function nowSec(){ return performance.now() * 1e-3; }
-
-async function requestMotionPermissionIfNeeded(){
-  const DME = window.DeviceMotionEvent;
-  if (!DME) return true;
-
-  if (typeof DME.requestPermission === "function"){
-    const res = await DME.requestPermission();
-    return res === "granted";
+  function mean(arr) {
+    if (!arr.length) return NaN;
+    let s = 0;
+    for (let i = 0; i < arr.length; i++) s += arr[i];
+    return s / arr.length;
   }
-  return true;
-}
 
-function resetAll(){
-  running = false;
-  lastT = null;
-  samples = [];
-  v = 0;
-  p = 0;
-  lastA = 0;
-  gLP = { x: 0, y: 0, z: 0 };
+  // ============================================================
+  // DOM
+  // ============================================================
+  const el = {
+    btnStart: document.getElementById("btnStart"),
+    btnStop: document.getElementById("btnStop"),
+    btnReset: document.getElementById("btnReset"),
 
-  btnStart.disabled = false;
-  btnStop.disabled = true;
-  setStatus("idle");
+    state: document.getElementById("state"),
 
-  dtEl.textContent = "-";
-  aEl.textContent = "-";
-  vEl.textContent = "-";
-  pEl.textContent = "-";
-  draw();
-}
+    axis: document.getElementById("axis"),
+    gain: document.getElementById("gain"),
+    tcapture: document.getElementById("tcapture"),
 
-function clampWindow(){
-  const w = parseFloat(windowSel.value);
-  const tNow = samples.length ? samples[samples.length - 1].t : nowSec();
-  const tMin = tNow - w;
-  while (samples.length && samples[0].t < tMin - 0.5) samples.shift();
-}
+    outT: document.getElementById("outT"),
+    outA: document.getElementById("outA"),
+    outV: document.getElementById("outV"),
+    outX: document.getElementById("outX"),
 
-function mag3(ax, ay, az){
-  return Math.sqrt(ax*ax + ay*ay + az*az);
-}
+    canvas: document.getElementById("plot"),
+  };
 
-function handleMotion(e){
-  if (!running) return;
+  const ctx = el.canvas.getContext("2d");
 
-  const t = nowSec();
-  if (lastT === null){ lastT = t; return; }
+  // ============================================================
+  // State
+  // ============================================================
+  const State = Object.freeze({
+    WAIT: "WAIT",
+    CAPTURING: "CAPTURING",
+    RUNNING: "RUNNING",
+    STOPPED: "STOPPED",
+  });
 
-  let dt = t - lastT;
-  if (dt <= 0 || dt > 0.2){ lastT = t; return; }
-  lastT = t;
+  const sim = {
+    state: State.WAIT,
 
-  // Try gravity-removed first
-  let ax=null, ay=null, az=null;
+    // captured accel (ABS value, m/s^2)
+    a0: 0,
 
-  if (e.acceleration && e.acceleration.x != null){
-    ax = e.acceleration.x;
-    ay = e.acceleration.y;
-    az = e.acceleration.z;
-  } else if (e.accelerationIncludingGravity && e.accelerationIncludingGravity.x != null){
-    const aig = {
-      x: e.accelerationIncludingGravity.x,
-      y: e.accelerationIncludingGravity.y,
-      z: e.accelerationIncludingGravity.z
+    // initial conditions at t=0 (after capture)
+    x0: 0,
+    v0: 0,
+
+    // time base
+    t0_wall: 0,  // wall time at motion start
+    t_stop: 0,   // t at stop
+
+    // plot buffers (last 10 sec)
+    winSec: 10,
+    maxPts: 600,
+    bufT: [],
+    bufA: [],
+    bufV: [],
+    bufX: [],
+  };
+
+  function setState(s) {
+    sim.state = s;
+    el.state.value = s;
+
+    el.btnStart.disabled = !(s === State.WAIT || s === State.STOPPED);
+    el.btnStop.disabled = !(s === State.RUNNING || s === State.CAPTURING);
+  }
+
+  // ============================================================
+  // iOS permission (Motion + Orientation)
+  // ============================================================
+  async function requestMotionPermissionIfNeeded() {
+    const DME = window.DeviceMotionEvent;
+    const DOE = window.DeviceOrientationEvent;
+
+    // If neither exists, sensor unsupported
+    if (!DME && !DOE) return { ok: false, reason: "Sensor unsupported" };
+
+    // iOS: Orientation permission may be required to show prompt
+    if (DOE && typeof DOE.requestPermission === "function") {
+      try {
+        const r = await DOE.requestPermission();
+        if (r !== "granted") return { ok: false, reason: "Orientation permission denied" };
+      } catch (e) {
+        return { ok: false, reason: "Orientation permission error" };
+      }
+    }
+
+    // iOS: Motion permission
+    if (DME && typeof DME.requestPermission === "function") {
+      try {
+        const r = await DME.requestPermission();
+        if (r !== "granted") return { ok: false, reason: "Motion permission denied" };
+      } catch (e) {
+        return { ok: false, reason: "Motion permission error" };
+      }
+    }
+
+    return { ok: true, reason: "" };
+  }
+
+  // ============================================================
+  // One-shot capture
+  // ============================================================
+  let motionHandler = null;
+
+  function stopListeningMotion() {
+    if (motionHandler) {
+      window.removeEventListener("devicemotion", motionHandler);
+      motionHandler = null;
+    }
+  }
+
+  function captureOnceThenRun() {
+    const axis = el.axis.value; // x/y/z
+    const gain = Number(el.gain.value) || 1.0;
+    const tc = clamp(Number(el.tcapture.value) || 0.2, 0.05, 0.5);
+
+    const samples = [];
+    const tStart = nowSec();
+
+    motionHandler = (ev) => {
+      const a = ev.accelerationIncludingGravity || ev.acceleration;
+      if (!a) return;
+
+      let v = 0;
+      if (axis === "x") v = a.x ?? 0;
+      if (axis === "y") v = a.y ?? 0;
+      if (axis === "z") v = a.z ?? 0;
+
+      // ABS value per request
+      v = Math.abs(v);
+
+      // sanity clip
+      v = clamp(v, 0, 50);
+
+      samples.push(v);
+
+      if (nowSec() - tStart >= tc) {
+        stopListeningMotion();
+
+        const a0raw = mean(samples);
+        if (!Number.isFinite(a0raw)) {
+          sim.a0 = 0;
+        } else {
+          sim.a0 = gain * a0raw;
+        }
+
+        // set initial conditions at capture end
+        sim.x0 = 0;
+        sim.v0 = 0;
+        sim.t0_wall = nowSec();
+        sim.t_stop = 0;
+
+        // reset buffers
+        sim.bufT = [];
+        sim.bufA = [];
+        sim.bufV = [];
+        sim.bufX = [];
+
+        setState(State.RUNNING);
+      }
     };
-    const alpha = 0.92;
-    gLP.x = alpha*gLP.x + (1-alpha)*aig.x;
-    gLP.y = alpha*gLP.y + (1-alpha)*aig.y;
-    gLP.z = alpha*gLP.z + (1-alpha)*aig.z;
 
-    ax = aig.x - gLP.x;
-    ay = aig.y - gLP.y;
-    az = aig.z - gLP.z;
-  } else {
-    return;
+    window.addEventListener("devicemotion", motionHandler, { passive: true });
+    setState(State.CAPTURING);
   }
 
-  const aMag = mag3(ax, ay, az); // absolute value (magnitude)
-
-  // integrate (trapezoidal) in 1D magnitude space
-  v += 0.5 * (lastA + aMag) * dt;
-  p += v * dt;
-  lastA = aMag;
-
-  samples.push({ t, a: aMag, v, p });
-  clampWindow();
-
-  dtEl.textContent = fmt(dt);
-  aEl.textContent  = fmt(aMag);
-  vEl.textContent  = fmt(v);
-  pEl.textContent  = fmt(p);
-
-  draw();
-}
-
-function minMax(arr){
-  let mn=Infinity, mx=-Infinity;
-  for (const x of arr){
-    if (!isFinite(x)) continue;
-    if (x < mn) mn = x;
-    if (x > mx) mx = x;
+  // ============================================================
+  // Motion (analytic)
+  // ============================================================
+  function kinematics(t, a0, x0, v0) {
+    const v = v0 + a0 * t;
+    const x = x0 + v0 * t + 0.5 * a0 * t * t;
+    return { x, v };
   }
-  if (mn === Infinity) return { mn: -1, mx: 1 };
-  if (mn === mx){
-    const d = Math.max(1e-3, Math.abs(mn)*0.1);
-    return { mn: mn-d, mx: mx+d };
-  }
-  return { mn, mx };
-}
 
-function drawGrid(x0,y0,w,h){
-  ctx.save();
-  ctx.strokeStyle = "rgba(0,0,0,0.12)";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(x0,y0,w,h);
-  for (let i=1;i<4;i++){
-    const y = y0 + (h*i)/4;
+  function getSimTime() {
+    if (sim.state === State.RUNNING) return nowSec() - sim.t0_wall;
+    if (sim.state === State.STOPPED) return sim.t_stop;
+    return 0;
+  }
+
+  // ============================================================
+  // Outputs
+  // ============================================================
+  function updateOutputs(t, a, v, x) {
+    el.outT.textContent = t.toFixed(3);
+    el.outA.textContent = a.toFixed(3);
+    el.outV.textContent = v.toFixed(3);
+    el.outX.textContent = x.toFixed(3);
+  }
+
+  function pushBuffer(t, a, v, x) {
+    sim.bufT.push(t);
+    sim.bufA.push(a);
+    sim.bufV.push(v);
+    sim.bufX.push(x);
+
+    if (sim.bufT.length > sim.maxPts) {
+      sim.bufT.shift();
+      sim.bufA.shift();
+      sim.bufV.shift();
+      sim.bufX.shift();
+    }
+
+    const tMin = t - sim.winSec;
+    while (sim.bufT.length && sim.bufT[0] < tMin) {
+      sim.bufT.shift();
+      sim.bufA.shift();
+      sim.bufV.shift();
+      sim.bufX.shift();
+    }
+  }
+
+  // ============================================================
+  // Plot (white background, 3 series: a, v, x)
+  // ============================================================
+  function drawPlot() {
+    const W = el.canvas.width;
+    const H = el.canvas.height;
+
+    // white background
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, W, H);
+
+    const padL = 52, padR = 12, padT = 12, padB = 28;
+    const x0p = padL, x1p = W - padR;
+    const y0p = padT, y1p = H - padB;
+
+    // grid
+    ctx.strokeStyle = "#e0e0e0";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 5; i++) {
+      const y = y0p + (y1p - y0p) * (i / 5);
+      ctx.beginPath();
+      ctx.moveTo(x0p, y);
+      ctx.lineTo(x1p, y);
+      ctx.stroke();
+    }
+
+    const n = sim.bufT.length;
+    if (n < 2) {
+      ctx.fillStyle = "#333333";
+      ctx.font = "12px system-ui";
+      ctx.fillText("a(t), v(t), x(t) plot (last 10 s)", x0p, H - 8);
+      return;
+    }
+
+    const tMin = sim.bufT[0];
+    const tMax = sim.bufT[n - 1];
+    const dt = Math.max(1e-9, tMax - tMin);
+
+    let ymin = Infinity, ymax = -Infinity;
+    for (let i = 0; i < n; i++) {
+      ymin = Math.min(ymin, sim.bufA[i], sim.bufV[i], sim.bufX[i]);
+      ymax = Math.max(ymax, sim.bufA[i], sim.bufV[i], sim.bufX[i]);
+    }
+    if (!Number.isFinite(ymin) || !Number.isFinite(ymax)) return;
+    if (Math.abs(ymax - ymin) < 1e-9) {
+      ymax += 1;
+      ymin -= 1;
+    }
+
+    const tx = (t) => x0p + (x1p - x0p) * ((t - tMin) / dt);
+    const ty = (y) => y1p - (y1p - y0p) * ((y - ymin) / (ymax - ymin));
+
+    // a(t)
+    ctx.strokeStyle = "#d32f2f";
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(x0,y);
-    ctx.lineTo(x0+w,y);
+    ctx.moveTo(tx(sim.bufT[0]), ty(sim.bufA[0]));
+    for (let i = 1; i < n; i++) ctx.lineTo(tx(sim.bufT[i]), ty(sim.bufA[i]));
     ctx.stroke();
-  }
-  ctx.restore();
-}
 
-function plotPanel(x0,y0,w,h,tArr,yArr,label){
-  drawGrid(x0,y0,w,h);
+    // v(t)
+    ctx.strokeStyle = "#1976d2";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(tx(sim.bufT[0]), ty(sim.bufV[0]));
+    for (let i = 1; i < n; i++) ctx.lineTo(tx(sim.bufT[i]), ty(sim.bufV[i]));
+    ctx.stroke();
 
-  ctx.save();
-  ctx.fillStyle = "rgba(0,0,0,0.7)";
-  ctx.font = "12px system-ui";
-  ctx.fillText(label, x0+8, y0+16);
+    // x(t)
+    ctx.strokeStyle = "#2e7d32";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(tx(sim.bufT[0]), ty(sim.bufX[0]));
+    for (let i = 1; i < n; i++) ctx.lineTo(tx(sim.bufT[i]), ty(sim.bufX[i]));
+    ctx.stroke();
 
-  if (tArr.length < 2){ ctx.restore(); return; }
+    // labels
+    ctx.fillStyle = "#111111";
+    ctx.font = "12px system-ui";
+    ctx.fillText("a(t)", x0p + 4, y0p + 12);
+    ctx.fillText("v(t)", x0p + 44, y0p + 12);
+    ctx.fillText("x(t)", x0p + 84, y0p + 12);
+    ctx.fillText("t", x1p - 10, H - 8);
 
-  const t0=tArr[0], t1=tArr[tArr.length-1];
-  const {mn,mx} = minMax(yArr);
-
-  ctx.strokeStyle = "rgba(0,120,220,0.95)";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  for (let i=0;i<tArr.length;i++){
-    const tx = (tArr[i]-t0)/Math.max(1e-9,(t1-t0));
-    const yy = (yArr[i]-mn)/Math.max(1e-9,(mx-mn));
-    const px = x0 + tx*w;
-    const py = y0 + (1-yy)*h;
-    if (i===0) ctx.moveTo(px,py);
-    else ctx.lineTo(px,py);
-  }
-  ctx.stroke();
-
-  ctx.fillStyle = "rgba(0,0,0,0.45)";
-  ctx.font = "11px system-ui";
-  ctx.fillText(mx.toFixed(2), x0+8, y0+30);
-  ctx.fillText(mn.toFixed(2), x0+8, y0+h-8);
-
-  ctx.restore();
-}
-
-function draw(){
-  const dpr = window.devicePixelRatio || 1;
-  const cssW = canvas.clientWidth;
-  const cssH = canvas.clientHeight;
-  const wantW = Math.floor(cssW*dpr);
-  const wantH = Math.floor(cssH*dpr);
-  if (canvas.width !== wantW || canvas.height !== wantH){
-    canvas.width = wantW;
-    canvas.height = wantH;
+    // y ticks
+    ctx.fillStyle = "#111111";
+    ctx.font = "11px system-ui";
+    for (let i = 0; i <= 4; i++) {
+      const yy = ymin + (ymax - ymin) * (i / 4);
+      const py = ty(yy);
+      ctx.fillText(yy.toFixed(2), 4, py + 4);
+    }
   }
 
-  ctx.clearRect(0,0,canvas.width,canvas.height);
+  // ============================================================
+  // Control
+  // ============================================================
+  function resetAll() {
+    stopListeningMotion();
 
-  const pad = 14*dpr;
-  const W = canvas.width - 2*pad;
-  const H = canvas.height - 2*pad;
-  const panelH = (H - 2*pad)/3;
+    sim.a0 = 0;
+    sim.x0 = 0;
+    sim.v0 = 0;
 
-  const tArr = samples.map(s=>s.t);
-  const aArr = samples.map(s=>s.a);
-  const vArr = samples.map(s=>s.v);
-  const pArr = samples.map(s=>s.p);
+    sim.t0_wall = 0;
+    sim.t_stop = 0;
 
-  let y0 = pad;
-  plotPanel(pad, y0, W, panelH, tArr, aArr, "|Accel|  (m/s^2)");
-  y0 += panelH + pad;
-  plotPanel(pad, y0, W, panelH, tArr, vArr, "Vel  (m/s)");
-  y0 += panelH + pad;
-  plotPanel(pad, y0, W, panelH, tArr, pArr, "Pos  (m)");
-}
+    sim.bufT = [];
+    sim.bufA = [];
+    sim.bufV = [];
+    sim.bufX = [];
 
-async function start(){
-  setStatus("permission...");
-  const ok = await requestMotionPermissionIfNeeded();
-  if (!ok){ setStatus("permission denied"); return; }
-
-  running = true;
-  lastT = null;
-  setStatus("running");
-  btnStart.disabled = true;
-  btnStop.disabled = false;
-
-  if (!window.__motion_listener_attached){
-    window.addEventListener("devicemotion", handleMotion, { passive:true });
-    window.__motion_listener_attached = true;
+    updateOutputs(0, 0, 0, 0);
+    setState(State.WAIT);
+    drawPlot();
   }
-}
 
-function stop(){
-  running = false;
-  setStatus("stopped");
-  btnStart.disabled = false;
-  btnStop.disabled = true;
-}
+  // ============================================================
+  // Buttons
+  // ============================================================
+  el.btnStart.addEventListener("click", async () => {
+    // Start = permission -> capture (short) -> run
+    stopListeningMotion();
 
-// iPhoneで「clickが効かない」ケースのために touchend も付ける
-btnStart.addEventListener("click", start);
-btnStart.addEventListener("touchend", (ev) => { ev.preventDefault(); start(); }, { passive:false });
+    // reset display
+    sim.t0_wall = 0;
+    sim.t_stop = 0;
+    sim.bufT = [];
+    sim.bufA = [];
+    sim.bufV = [];
+    sim.bufX = [];
+    updateOutputs(0, sim.a0, sim.v0, sim.x0);
+    drawPlot();
 
-btnStop.addEventListener("click", stop);
-btnStop.addEventListener("touchend", (ev) => { ev.preventDefault(); stop(); }, { passive:false });
+    const perm = await requestMotionPermissionIfNeeded();
+    if (!perm.ok) {
+      // if permission fails, keep WAIT and show 0s (no manual mode in this version)
+      setState(State.WAIT);
+      return;
+    }
 
-btnReset.addEventListener("click", resetAll);
-btnReset.addEventListener("touchend", (ev) => { ev.preventDefault(); resetAll(); }, { passive:false });
+    captureOnceThenRun();
+  });
 
-windowSel.addEventListener("change", () => { clampWindow(); draw(); });
+  el.btnStop.addEventListener("click", () => {
+    if (sim.state === State.CAPTURING) {
+      stopListeningMotion();
+      setState(State.STOPPED);
+      return;
+    }
+    if (sim.state !== State.RUNNING) return;
+    sim.t_stop = nowSec() - sim.t0_wall;
+    setState(State.STOPPED);
+  });
 
-resetAll();
+  el.btnReset.addEventListener("click", () => resetAll());
+
+  // ============================================================
+  // Main loop
+  // ============================================================
+  function tick() {
+    if (sim.state === State.RUNNING) {
+      const t = getSimTime();
+      const { x, v } = kinematics(t, sim.a0, sim.x0, sim.v0);
+      const a = sim.a0;
+
+      updateOutputs(t, a, v, x);
+      pushBuffer(t, a, v, x);
+      drawPlot();
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // ============================================================
+  // Init
+  // ============================================================
+  // IMPORTANT: index.html 側で以下のIDを用意すること
+  // btnStart, btnStop, btnReset, state
+  // axis, gain, tcapture
+  // outT, outA, outV, outX
+  // plot (canvas)
+  resetAll();
+  requestAnimationFrame(tick);
+})();
 
