@@ -1,23 +1,64 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="ja">
 <head>
-<meta charset="UTF-8">
-<title>Accel One Shot</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Accel One Shot</title>
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <div class="wrap">
+    <h1>Accel One Shot</h1>
 
-<h1>Accel One Shot</h1>
+    <div class="panel">
+      <div class="row">
+        <button id="btnStart">Start</button>
+        <button id="btnStop" disabled>Stop</button>
+        <button id="btnReset">Reset</button>
 
-<button onclick="start()">Start</button>
-<button onclick="stop()">Stop</button>
+        <label class="ml">
+          Axis
+          <select id="axis">
+            <option value="x">x</option>
+            <option value="y">y</option>
+            <option value="z">z</option>
+          </select>
+        </label>
 
-<p>ax: <span id="ax">0</span></p>
-<p>ay: <span id="ay">0</span></p>
-<p>az: <span id="az">0</span></p>
-<p>|a|: <span id="amag">0</span></p>
-<p>Max: <span id="max">0</span></p>
+        <label class="ml">
+          Window (s)
+          <select id="windowSec">
+            <option value="5">5</option>
+            <option value="10" selected>10</option>
+            <option value="20">20</option>
+            <option value="30">30</option>
+          </select>
+        </label>
+      </div>
 
-<script src="main.js"></script>
+      <div class="row small">
+        <div>Status: <span id="status">idle</span></div>
+        <div class="ml">dt: <span id="dt">-</span> s</div>
+        <div class="ml">a: <span id="a">-</span> m/s^2</div>
+        <div class="ml">v: <span id="v">-</span> m/s</div>
+        <div class="ml">p: <span id="p">-</span> m</div>
+      </div>
 
+      <div class="row small">
+        <div class="hint">
+          iPhone: Start後に許可が出ます。Android: そのまま動くことが多いです。
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <canvas id="chart" width="900" height="520"></canvas>
+      <div class="legend small">
+        上段: Accel (m/s^2) / 中段: Vel (m/s) / 下段: Pos (m)
+      </div>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
 </body>
 </html>
