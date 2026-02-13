@@ -1,88 +1,430 @@
-:root{
-  --bg:#ffffff;
-  --fg:#111111;
-  --panel:#ffffff;
-  --line:#d9d9d9;
-  --muted:#555555;
-}
+// main.js
+(() => {
+  "use strict";
 
-*{ box-sizing:border-box; }
+  // ============================================
+  // Utility
+  // ============================================
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const nowSec = () => performance.now() * 1e-3;
 
-html,body{
-  margin:0;
-  padding:0;
-  background:var(--bg);
-  color:var(--fg);
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif;
-}
+  function mean(arr) {
+    if (!arr.length) return NaN;
+    let s = 0;
+    for (let i = 0; i < arr.length; i++) s += arr[i];
+    return s / arr.length;
+  }
 
-.wrap{
-  max-width:980px;
-  margin:0 auto;
-  padding:16px;
-}
+  function safeNum(v, fallback = 0) {
+    const x = Number(v);
+    return Number.isFinite(x) ? x : fallback;
+  }
 
-h1{
-  margin:8px 0 14px;
-  font-size:28px;
-  font-weight:700;
-}
+  // ============================================
+  // DOM
+  // ============================================
+  const el = {
+    btnCapture: document.getElementById("btnCapture"),
+    btnRun: document.getElementById("btnRun"),
+    btnPause: document.getElementById("btnPause"),
+    btnReset: document.getElementById("btnReset"),
+    state: document.getElementById("state"),
 
-.panel{
-  position:relative;
-  background:var(--panel);
-  border:1px solid var(--line);
-  border-radius:10px;
-  padding:12px;
-  margin:12px 0;
-}
+    axis: document.getElementById("axis"),
+    gain: document.getElementById("gain"),
+    tcapture: document.getElementById("tcapture"),
+    x0: document.getElementById("x0"),
+    v0: document.getElementById("v0"),
+    a0manual: document.getElementById("a0manual"),
+    unit: document.getElementById("unit"),
 
-.row{
-  display:flex;
-  flex-wrap:wrap;
-  align-items:center;
-  gap:10px;
-}
+    outT: document.getElementById("outT"),
+    outA0: document.getElementById("outA0"),
+    outV: document.getElementById("outV"),
+    outX: document.getElementById("outX"),
 
-.small{ font-size:13px; color:var(--muted); }
-.ml{ margin-left:14px; }
+    canvas: document.getElementById("plot"),
+  };
 
-button{
-  position:relative;
-  z-index:10;                 /* これで「押せない」系を回避 */
-  border:1px solid var(--line);
-  background:#f3f3f3;
-  color:var(--fg);
-  padding:10px 14px;
-  border-radius:10px;
-  cursor:pointer;
-  touch-action: manipulation;  /* iOSのタップ挙動を安定化 */
-  -webkit-tap-highlight-color: transparent;
-  font-size:16px;
-}
+  const ctx = el.canvas.getContext("2d");
 
-button:disabled{
-  opacity:0.5;
-  cursor:not-allowed;
-}
+  // ============================================
+  // State machine
+  // ============================================
+  const State = Object.freeze({
+    WAIT: "WAIT",
+    CAPTURING: "CAPTURING",
+    READY: "READY",
+    RUNNING: "RUNNING",
+    PAUSED: "PAUSED",
+  });
 
-select{
-  margin-left:6px;
-  border:1px solid var(--line);
-  background:#ffffff;
-  color:var(--fg);
-  padding:8px 10px;
-  border-radius:10px;
-}
+  const sim = {
+    state: State.WAIT,
 
-canvas{
-  width:100%;
-  height:auto;
-  border-radius:10px;
-  background:#ffffff;
-  border:1px solid var(--line);
-  pointer-events:none;         /* canvasがタップを吸わないように */
-}
+    // fixed acceleration after capture (m/s^2)
+    a0: 0,
 
-.hint{ line-height:1.5; }
-.legend{ margin-top:8px; }
+    // initial conditions at start time (t=0)
+    x0: 0,
+    v0: 0,
+
+    // time base
+    t0_wall: 0,  // wall time when RUN starts
+    t_pause: 0,  // current t when paused
+
+    // plot buffers (last winSec)
+    winSec: 10,
+    maxPts: 600, // ~60fps * 10sec
+    bufT: [],
+    bufA: [],
+    bufV: [],
+    bufX: [],
+  };
+
+  function setState(s) {
+    sim.state = s;
+    el.state.value = s;
+
+    el.btnCapture.disabled = !(s === State.WAIT || s === State.READY || s === State.PAUSED);
+    el.btnRun.disabled = !(s === State.READY || s === State.PAUSED);
+    el.btnPause.disabled = !(s === State.RUNNING);
+  }
+
+  // ============================================
+  // Model: constant acceleration (analytic)
+  // ============================================
+  function kinematics(t, a0, x0, v0) {
+    const v = v0 + a0 * t;
+    const x = x0 + v0 * t + 0.5 * a0 * t * t;
+    return { a: a0, v, x };
+  }
+
+  // ============================================
+  // Output
+  // ============================================
+  function updateOutputs(t, a0, v, x) {
+    const unit = el.unit.value;
+    const xDisp = unit === "cm" ? x * 100 : x;
+
+    el.outT.textContent = t.toFixed(3);
+    el.outA0.textContent = a0.toFixed(3);
+    el.outV.textContent = v.toFixed(3);
+    el.outX.textContent = unit === "cm" ? `${xDisp.toFixed(3)} cm` : `${xDisp.toFixed(3)} m`;
+  }
+
+  // ============================================
+  // Plot buffer
+  // ============================================
+  function clearBuffers() {
+    sim.bufT = [];
+    sim.bufA = [];
+    sim.bufV = [];
+    sim.bufX = [];
+  }
+
+  function pushBuffer(t, a, v, x) {
+    sim.bufT.push(t);
+    sim.bufA.push(a);
+    sim.bufV.push(v);
+    sim.bufX.push(x);
+
+    if (sim.bufT.length > sim.maxPts) {
+      sim.bufT.shift(); sim.bufA.shift(); sim.bufV.shift(); sim.bufX.shift();
+    }
+
+    const tMin = t - sim.winSec;
+    while (sim.bufT.length && sim.bufT[0] < tMin) {
+      sim.bufT.shift(); sim.bufA.shift(); sim.bufV.shift(); sim.bufX.shift();
+    }
+  }
+
+  // ============================================
+  // Plot: draw a(t), v(t), x(t) on one canvas
+  // (same y-axis auto-scale across all 3)
+  // ============================================
+  function drawPlot() {
+    const W = el.canvas.width;
+    const H = el.canvas.height;
+
+    ctx.clearRect(0, 0, W, H);
+
+    const padL = 52, padR = 10, padT = 12, padB = 24;
+    const xL = padL, xR = W - padR;
+    const yT = padT, yB = H - padB;
+
+    // grid
+    ctx.globalAlpha = 1.0;
+    ctx.strokeStyle = "#cccccc";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 5; i++) {
+      const y = yT + (yB - yT) * (i / 5);
+      ctx.beginPath();
+      ctx.moveTo(xL, y);
+      ctx.lineTo(xR, y);
+      ctx.stroke();
+    }
+
+    const n = sim.bufT.length;
+    if (n < 2) {
+      ctx.fillStyle = "#666";
+      ctx.font = "12px system-ui";
+      ctx.fillText("a(t), v(t), x(t) plot (last 10s)", xL, H - 6);
+      return;
+    }
+
+    const tMin = sim.bufT[0];
+    const tMax = sim.bufT[n - 1];
+    const tSpan = Math.max(1e-9, tMax - tMin);
+
+    // y-range across A/V/X
+    let ymin = Infinity, ymax = -Infinity;
+    for (let i = 0; i < n; i++) {
+      const a = sim.bufA[i], v = sim.bufV[i], x = sim.bufX[i];
+      ymin = Math.min(ymin, a, v, x);
+      ymax = Math.max(ymax, a, v, x);
+    }
+    if (!Number.isFinite(ymin) || !Number.isFinite(ymax)) return;
+    if (Math.abs(ymax - ymin) < 1e-6) { ymax += 1; ymin -= 1; }
+
+    const tx = (t) => xL + (xR - xL) * ((t - tMin) / tSpan);
+    const ty = (y) => yB - (yB - yT) * ((y - ymin) / (ymax - ymin));
+
+    // x(t)
+    ctx.strokeStyle = "#1565c0";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(tx(sim.bufT[0]), ty(sim.bufX[0]));
+    for (let i = 1; i < n; i++) ctx.lineTo(tx(sim.bufT[i]), ty(sim.bufX[i]));
+    ctx.stroke();
+
+    // v(t)
+    ctx.strokeStyle = "#2e7d32";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(tx(sim.bufT[0]), ty(sim.bufV[0]));
+    for (let i = 1; i < n; i++) ctx.lineTo(tx(sim.bufT[i]), ty(sim.bufV[i]));
+    ctx.stroke();
+
+    // a(t) (constant after capture)
+    ctx.strokeStyle = "#c62828";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(tx(sim.bufT[0]), ty(sim.bufA[0]));
+    for (let i = 1; i < n; i++) ctx.lineTo(tx(sim.bufT[i]), ty(sim.bufA[i]));
+    ctx.stroke();
+
+    // labels
+    ctx.fillStyle = "#444";
+    ctx.font = "12px system-ui";
+    ctx.fillText("x(t)", xL + 4, yT + 12);
+    ctx.fillText("v(t)", xL + 44, yT + 12);
+    ctx.fillText("a(t)", xL + 84, yT + 12);
+    ctx.fillText("t", xR - 10, H - 6);
+
+    // y ticks
+    ctx.fillStyle = "#444";
+    ctx.font = "11px system-ui";
+    for (let i = 0; i <= 4; i++) {
+      const yy = ymin + (ymax - ymin) * (i / 4);
+      const py = ty(yy);
+      ctx.fillText(yy.toFixed(2), 4, py + 4);
+    }
+  }
+
+  // ============================================
+  // Time control
+  // ============================================
+  function getSimTime() {
+    if (sim.state === State.RUNNING) return nowSec() - sim.t0_wall;
+    if (sim.state === State.PAUSED) return sim.t_pause;
+    return 0;
+  }
+
+  // ============================================
+  // Sensor capture (one-shot) with iOS permission
+  // ============================================
+  let motionHandler = null;
+
+  async function requestMotionPermission() {
+    // iOS Safari: DeviceMotionEvent.requestPermission() exists
+    // Other browsers: no need, just proceed
+    if (typeof DeviceMotionEvent === "undefined") return { ok: false, reason: "DeviceMotionEvent unsupported" };
+
+    const DM = DeviceMotionEvent;
+    if (typeof DM.requestPermission === "function") {
+      try {
+        const res = await DM.requestPermission();
+        if (res !== "granted") return { ok: false, reason: "Permission denied" };
+      } catch (e) {
+        return { ok: false, reason: "Permission error" };
+      }
+    }
+    return { ok: true, reason: "" };
+  }
+
+  function stopCapture(samplesAbs, gain) {
+    if (motionHandler) {
+      window.removeEventListener("devicemotion", motionHandler);
+      motionHandler = null;
+    }
+
+    // a0: mean(|a_axis|)
+    const a0raw = mean(samplesAbs);
+    if (!Number.isFinite(a0raw)) {
+      // fallback manual
+      sim.a0 = safeNum(el.a0manual.value, 0);
+    } else {
+      sim.a0 = gain * a0raw;
+    }
+
+    sim.x0 = safeNum(el.x0.value, 0);
+    sim.v0 = safeNum(el.v0.value, 0);
+
+    updateOutputs(0, sim.a0, sim.v0, sim.x0);
+    setState(State.READY);
+  }
+
+  function startCapture() {
+    const tc = clamp(safeNum(el.tcapture.value, 0.2), 0.05, 0.5);
+    const axis = el.axis.value;
+    const gain = safeNum(el.gain.value, 1.0);
+
+    const samplesAbs = [];
+    const tStart = nowSec();
+
+    motionHandler = (ev) => {
+      // Prefer accelerationIncludingGravity (gravity included)
+      const a = ev.accelerationIncludingGravity || ev.acceleration;
+      if (!a) return;
+
+      let v = 0;
+      if (axis === "x") v = a.x ?? 0;
+      if (axis === "y") v = a.y ?? 0;
+      if (axis === "z") v = a.z ?? 0;
+
+      // clip & abs (要求: 絶対値)
+      v = clamp(v, -50, 50);
+      samplesAbs.push(Math.abs(v));
+
+      if (nowSec() - tStart >= tc) {
+        stopCapture(samplesAbs, gain);
+      }
+    };
+
+    window.addEventListener("devicemotion", motionHandler, { passive: true });
+    setState(State.CAPTURING);
+  }
+
+  // ============================================
+  // Reset
+  // ============================================
+  function resetAll() {
+    if (motionHandler) {
+      window.removeEventListener("devicemotion", motionHandler);
+      motionHandler = null;
+    }
+
+    sim.a0 = 0;
+    sim.x0 = safeNum(el.x0.value, 0);
+    sim.v0 = safeNum(el.v0.value, 0);
+
+    sim.t0_wall = 0;
+    sim.t_pause = 0;
+    clearBuffers();
+
+    updateOutputs(0, sim.a0, sim.v0, sim.x0);
+    setState(State.WAIT);
+    drawPlot();
+  }
+
+  // ============================================
+  // Buttons
+  // ============================================
+  el.btnCapture.addEventListener("click", async () => {
+    // stop any old handler
+    if (motionHandler) {
+      window.removeEventListener("devicemotion", motionHandler);
+      motionHandler = null;
+    }
+
+    // clear timeline/buffers for a new run
+    sim.t0_wall = 0;
+    sim.t_pause = 0;
+    clearBuffers();
+    drawPlot();
+
+    // iPhone permission must be triggered by user gesture (this click)
+    const perm = await requestMotionPermission();
+    if (!perm.ok) {
+      // fallback to manual
+      sim.a0 = safeNum(el.a0manual.value, 0);
+      sim.x0 = safeNum(el.x0.value, 0);
+      sim.v0 = safeNum(el.v0.value, 0);
+      updateOutputs(0, sim.a0, sim.v0, sim.x0);
+      setState(State.READY);
+      return;
+    }
+
+    startCapture();
+  });
+
+  el.btnRun.addEventListener("click", () => {
+    if (sim.state === State.READY) {
+      sim.t0_wall = nowSec();
+      sim.t_pause = 0;
+      clearBuffers();
+      setState(State.RUNNING);
+      return;
+    }
+    if (sim.state === State.PAUSED) {
+      sim.t0_wall = nowSec() - sim.t_pause;
+      setState(State.RUNNING);
+      return;
+    }
+  });
+
+  el.btnPause.addEventListener("click", () => {
+    if (sim.state !== State.RUNNING) return;
+    sim.t_pause = nowSec() - sim.t0_wall;
+    setState(State.PAUSED);
+  });
+
+  el.btnReset.addEventListener("click", () => {
+    resetAll();
+  });
+
+  // reflect inputs (only in WAIT)
+  ["x0", "v0", "a0manual", "unit"].forEach((id) => {
+    el[id].addEventListener("input", () => {
+      if (sim.state !== State.WAIT) return;
+      const x0 = safeNum(el.x0.value, 0);
+      const v0 = safeNum(el.v0.value, 0);
+      const a0 = Math.abs(safeNum(el.a0manual.value, 0)); // manual also abs
+      updateOutputs(0, a0, v0, x0);
+      drawPlot();
+    });
+  });
+
+  // ============================================
+  // Main loop
+  // ============================================
+  function tick() {
+    const t = getSimTime();
+
+    if (sim.state === State.RUNNING) {
+      const { a, v, x } = kinematics(t, sim.a0, sim.x0, sim.v0);
+      updateOutputs(t, a, v, x);
+      pushBuffer(t, a, v, x);
+      drawPlot();
+    }
+
+    requestAnimationFrame(tick);
+  }
+
+  // ============================================
+  // init
+  // ============================================
+  resetAll();
+  requestAnimationFrame(tick);
+})();
