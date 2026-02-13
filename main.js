@@ -2,9 +2,6 @@
 (() => {
   "use strict";
 
-  // ============================================================
-  // Utilities
-  // ============================================================
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
   const nowSec = () => performance.now() * 1e-3;
 
@@ -15,14 +12,10 @@
     return s / arr.length;
   }
 
-  // ============================================================
-  // DOM
-  // ============================================================
   const el = {
     btnStart: document.getElementById("btnStart"),
     btnStop: document.getElementById("btnStop"),
     btnReset: document.getElementById("btnReset"),
-
     state: document.getElementById("state"),
 
     axis: document.getElementById("axis"),
@@ -39,9 +32,6 @@
 
   const ctx = el.canvas.getContext("2d");
 
-  // ============================================================
-  // State
-  // ============================================================
   const State = Object.freeze({
     WAIT: "WAIT",
     CAPTURING: "CAPTURING",
@@ -60,12 +50,13 @@
     v0: 0,
 
     // time base
-    t0_wall: 0,  // wall time at motion start
-    t_stop: 0,   // t at stop
+    t0_wall: 0, // wall time at motion start
+    t_stop: 0,  // t at stop
 
     // plot buffers (last 10 sec)
     winSec: 10,
     maxPts: 600,
+
     bufT: [],
     bufA: [],
     bufV: [],
@@ -80,42 +71,36 @@
     el.btnStop.disabled = !(s === State.RUNNING || s === State.CAPTURING);
   }
 
-  // ============================================================
-  // iOS permission (Motion + Orientation)
-  // ============================================================
   async function requestMotionPermissionIfNeeded() {
     const DME = window.DeviceMotionEvent;
     const DOE = window.DeviceOrientationEvent;
 
-    // If neither exists, sensor unsupported
     if (!DME && !DOE) return { ok: false, reason: "Sensor unsupported" };
 
-    // iOS: Orientation permission may be required to show prompt
+    // iOS: orientation permission first (some versions need this to show prompt properly)
     if (DOE && typeof DOE.requestPermission === "function") {
       try {
         const r = await DOE.requestPermission();
-        if (r !== "granted") return { ok: false, reason: "Orientation permission denied" };
-      } catch (e) {
-        return { ok: false, reason: "Orientation permission error" };
+        if (r !== "granted") return { ok: false, reason: "Orientation denied" };
+      } catch {
+        return { ok: false, reason: "Orientation error" };
       }
     }
 
-    // iOS: Motion permission
+    // iOS: motion permission
     if (DME && typeof DME.requestPermission === "function") {
       try {
         const r = await DME.requestPermission();
-        if (r !== "granted") return { ok: false, reason: "Motion permission denied" };
-      } catch (e) {
-        return { ok: false, reason: "Motion permission error" };
+        if (r !== "granted") return { ok: false, reason: "Motion denied" };
+      } catch {
+        return { ok: false, reason: "Motion error" };
       }
     }
 
     return { ok: true, reason: "" };
   }
 
-  // ============================================================
   // One-shot capture
-  // ============================================================
   let motionHandler = null;
 
   function stopListeningMotion() {
@@ -142,31 +127,23 @@
       if (axis === "y") v = a.y ?? 0;
       if (axis === "z") v = a.z ?? 0;
 
-      // ABS value per request
+      // ABS + safety clip
       v = Math.abs(v);
-
-      // sanity clip
       v = clamp(v, 0, 50);
-
       samples.push(v);
 
       if (nowSec() - tStart >= tc) {
         stopListeningMotion();
 
         const a0raw = mean(samples);
-        if (!Number.isFinite(a0raw)) {
-          sim.a0 = 0;
-        } else {
-          sim.a0 = gain * a0raw;
-        }
+        sim.a0 = Number.isFinite(a0raw) ? gain * a0raw : 0;
 
-        // set initial conditions at capture end
         sim.x0 = 0;
         sim.v0 = 0;
+
         sim.t0_wall = nowSec();
         sim.t_stop = 0;
 
-        // reset buffers
         sim.bufT = [];
         sim.bufA = [];
         sim.bufV = [];
@@ -180,9 +157,7 @@
     setState(State.CAPTURING);
   }
 
-  // ============================================================
-  // Motion (analytic)
-  // ============================================================
+  // Analytic motion
   function kinematics(t, a0, x0, v0) {
     const v = v0 + a0 * t;
     const x = x0 + v0 * t + 0.5 * a0 * t * t;
@@ -195,9 +170,6 @@
     return 0;
   }
 
-  // ============================================================
-  // Outputs
-  // ============================================================
   function updateOutputs(t, a, v, x) {
     el.outT.textContent = t.toFixed(3);
     el.outA.textContent = a.toFixed(3);
@@ -212,42 +184,32 @@
     sim.bufX.push(x);
 
     if (sim.bufT.length > sim.maxPts) {
-      sim.bufT.shift();
-      sim.bufA.shift();
-      sim.bufV.shift();
-      sim.bufX.shift();
+      sim.bufT.shift(); sim.bufA.shift(); sim.bufV.shift(); sim.bufX.shift();
     }
 
     const tMin = t - sim.winSec;
     while (sim.bufT.length && sim.bufT[0] < tMin) {
-      sim.bufT.shift();
-      sim.bufA.shift();
-      sim.bufV.shift();
-      sim.bufX.shift();
+      sim.bufT.shift(); sim.bufA.shift(); sim.bufV.shift(); sim.bufX.shift();
     }
   }
 
-  // ============================================================
-  // Plot (white background, 3 series: a, v, x)
-  // ============================================================
+  // Plot: 3 rows (a, v, x), white background
   function drawPlot() {
     const W = el.canvas.width;
     const H = el.canvas.height;
 
-    // white background
     ctx.clearRect(0, 0, W, H);
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, W, H);
 
-    const padL = 52, padR = 12, padT = 12, padB = 28;
+    const padL = 52, padR = 12, padT = 12, padB = 22;
     const x0p = padL, x1p = W - padR;
     const y0p = padT, y1p = H - padB;
 
-    // grid
     ctx.strokeStyle = "#e0e0e0";
     ctx.lineWidth = 1;
-    for (let i = 0; i <= 5; i++) {
-      const y = y0p + (y1p - y0p) * (i / 5);
+    for (let i = 0; i <= 6; i++) {
+      const y = y0p + (y1p - y0p) * (i / 6);
       ctx.beginPath();
       ctx.moveTo(x0p, y);
       ctx.lineTo(x1p, y);
@@ -258,7 +220,7 @@
     if (n < 2) {
       ctx.fillStyle = "#333333";
       ctx.font = "12px system-ui";
-      ctx.fillText("a(t), v(t), x(t) plot (last 10 s)", x0p, H - 8);
+      ctx.fillText("a(t), v(t), x(t) (last 10 s)", x0p, H - 8);
       return;
     }
 
@@ -266,93 +228,73 @@
     const tMax = sim.bufT[n - 1];
     const dt = Math.max(1e-9, tMax - tMin);
 
-    let ymin = Infinity, ymax = -Infinity;
-    for (let i = 0; i < n; i++) {
-      ymin = Math.min(ymin, sim.bufA[i], sim.bufV[i], sim.bufX[i]);
-      ymax = Math.max(ymax, sim.bufA[i], sim.bufV[i], sim.bufX[i]);
-    }
-    if (!Number.isFinite(ymin) || !Number.isFinite(ymax)) return;
-    if (Math.abs(ymax - ymin) < 1e-9) {
-      ymax += 1;
-      ymin -= 1;
-    }
-
     const tx = (t) => x0p + (x1p - x0p) * ((t - tMin) / dt);
-    const ty = (y) => y1p - (y1p - y0p) * ((y - ymin) / (ymax - ymin));
 
-    // a(t)
-    ctx.strokeStyle = "#d32f2f";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(tx(sim.bufT[0]), ty(sim.bufA[0]));
-    for (let i = 1; i < n; i++) ctx.lineTo(tx(sim.bufT[i]), ty(sim.bufA[i]));
-    ctx.stroke();
+    // split into 3 bands
+    const bandH = (y1p - y0p) / 3;
+    const bands = [
+      { name: "a", arr: sim.bufA, yTop: y0p + 0 * bandH, yBot: y0p + 1 * bandH },
+      { name: "v", arr: sim.bufV, yTop: y0p + 1 * bandH, yBot: y0p + 2 * bandH },
+      { name: "x", arr: sim.bufX, yTop: y0p + 2 * bandH, yBot: y0p + 3 * bandH },
+    ];
 
-    // v(t)
-    ctx.strokeStyle = "#1976d2";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(tx(sim.bufT[0]), ty(sim.bufV[0]));
-    for (let i = 1; i < n; i++) ctx.lineTo(tx(sim.bufT[i]), ty(sim.bufV[i]));
-    ctx.stroke();
+    function drawSeries(band, stroke, label) {
+      let ymin = Infinity, ymax = -Infinity;
+      for (let i = 0; i < n; i++) {
+        ymin = Math.min(ymin, band.arr[i]);
+        ymax = Math.max(ymax, band.arr[i]);
+      }
+      if (!Number.isFinite(ymin) || !Number.isFinite(ymax)) return;
+      if (Math.abs(ymax - ymin) < 1e-9) { ymax += 1; ymin -= 1; }
 
-    // x(t)
-    ctx.strokeStyle = "#2e7d32";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(tx(sim.bufT[0]), ty(sim.bufX[0]));
-    for (let i = 1; i < n; i++) ctx.lineTo(tx(sim.bufT[i]), ty(sim.bufX[i]));
-    ctx.stroke();
+      const ty = (y) => band.yBot - (band.yBot - band.yTop) * ((y - ymin) / (ymax - ymin));
 
-    // labels
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(tx(sim.bufT[0]), ty(band.arr[0]));
+      for (let i = 1; i < n; i++) ctx.lineTo(tx(sim.bufT[i]), ty(band.arr[i]));
+      ctx.stroke();
+
+      ctx.fillStyle = "#111111";
+      ctx.font = "12px system-ui";
+      ctx.fillText(label, x0p + 4, band.yTop + 12);
+
+      ctx.fillStyle = "#111111";
+      ctx.font = "11px system-ui";
+      ctx.fillText(ymax.toFixed(2), 4, band.yTop + 12);
+      ctx.fillText(ymin.toFixed(2), 4, band.yBot - 4);
+    }
+
+    drawSeries(bands[0], "#d32f2f", "|a|");
+    drawSeries(bands[1], "#1976d2", "v");
+    drawSeries(bands[2], "#2e7d32", "x");
+
     ctx.fillStyle = "#111111";
     ctx.font = "12px system-ui";
-    ctx.fillText("a(t)", x0p + 4, y0p + 12);
-    ctx.fillText("v(t)", x0p + 44, y0p + 12);
-    ctx.fillText("x(t)", x0p + 84, y0p + 12);
     ctx.fillText("t", x1p - 10, H - 8);
-
-    // y ticks
-    ctx.fillStyle = "#111111";
-    ctx.font = "11px system-ui";
-    for (let i = 0; i <= 4; i++) {
-      const yy = ymin + (ymax - ymin) * (i / 4);
-      const py = ty(yy);
-      ctx.fillText(yy.toFixed(2), 4, py + 4);
-    }
   }
 
-  // ============================================================
-  // Control
-  // ============================================================
   function resetAll() {
     stopListeningMotion();
-
     sim.a0 = 0;
     sim.x0 = 0;
     sim.v0 = 0;
-
     sim.t0_wall = 0;
     sim.t_stop = 0;
-
     sim.bufT = [];
     sim.bufA = [];
     sim.bufV = [];
     sim.bufX = [];
-
     updateOutputs(0, 0, 0, 0);
     setState(State.WAIT);
     drawPlot();
   }
 
-  // ============================================================
   // Buttons
-  // ============================================================
   el.btnStart.addEventListener("click", async () => {
-    // Start = permission -> capture (short) -> run
     stopListeningMotion();
 
-    // reset display
     sim.t0_wall = 0;
     sim.t_stop = 0;
     sim.bufT = [];
@@ -364,7 +306,7 @@
 
     const perm = await requestMotionPermissionIfNeeded();
     if (!perm.ok) {
-      // if permission fails, keep WAIT and show 0s (no manual mode in this version)
+      // 権限が出ない/未対応なら、この版は 0 のまま停止
       setState(State.WAIT);
       return;
     }
@@ -385,9 +327,7 @@
 
   el.btnReset.addEventListener("click", () => resetAll());
 
-  // ============================================================
   // Main loop
-  // ============================================================
   function tick() {
     if (sim.state === State.RUNNING) {
       const t = getSimTime();
@@ -401,15 +341,6 @@
     requestAnimationFrame(tick);
   }
 
-  // ============================================================
-  // Init
-  // ============================================================
-  // IMPORTANT: index.html 側で以下のIDを用意すること
-  // btnStart, btnStop, btnReset, state
-  // axis, gain, tcapture
-  // outT, outA, outV, outX
-  // plot (canvas)
   resetAll();
   requestAnimationFrame(tick);
 })();
-
